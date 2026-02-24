@@ -77,8 +77,18 @@ func (tm *TokenManager) getBestToken() (types.TokenInfo, error) {
 
 	// 选择最优token（内部方法，不加锁）
 	bestToken := tm.selectBestTokenUnlocked()
+
+	// 如果没有可用token，强制刷新一次再试
 	if bestToken == nil {
-		return types.TokenInfo{}, fmt.Errorf("没有可用的token")
+		logger.Info("所有token不可用，强制刷新重试")
+		if err := tm.refreshCacheUnlocked(); err != nil {
+			logger.Warn("强制刷新token缓存失败", logger.Err(err))
+			return types.TokenInfo{}, fmt.Errorf("没有可用的token")
+		}
+		bestToken = tm.selectBestTokenUnlocked()
+		if bestToken == nil {
+			return types.TokenInfo{}, fmt.Errorf("没有可用的token")
+		}
 	}
 
 	// 更新最后使用时间（在锁内，安全）
@@ -105,8 +115,18 @@ func (tm *TokenManager) GetBestTokenWithUsage() (*types.TokenWithUsage, error) {
 
 	// 选择最优token（内部方法，不加锁）
 	bestToken := tm.selectBestTokenUnlocked()
+
+	// 如果没有可用token，强制刷新一次再试
 	if bestToken == nil {
-		return nil, fmt.Errorf("没有可用的token")
+		logger.Info("所有token不可用，强制刷新重试")
+		if err := tm.refreshCacheUnlocked(); err != nil {
+			logger.Warn("强制刷新token缓存失败", logger.Err(err))
+			return nil, fmt.Errorf("没有可用的token")
+		}
+		bestToken = tm.selectBestTokenUnlocked()
+		if bestToken == nil {
+			return nil, fmt.Errorf("没有可用的token")
+		}
 	}
 
 	// 更新最后使用时间（在锁内，安全）
@@ -196,6 +216,7 @@ func (tm *TokenManager) selectBestTokenUnlocked() *CachedToken {
 func (tm *TokenManager) refreshCacheUnlocked() error {
 	logger.Debug("开始刷新token缓存")
 
+	successCount := 0
 	for i, cfg := range tm.configs {
 		if cfg.Disabled {
 			continue
@@ -235,9 +256,15 @@ func (tm *TokenManager) refreshCacheUnlocked() error {
 		logger.Debug("token缓存更新",
 			logger.String("cache_key", cacheKey),
 			logger.Float64("available", available))
+		successCount++
 	}
 
-	tm.lastRefresh = time.Now()
+	// 只有至少一个token刷新成功才更新lastRefresh，否则允许下次立即重试
+	if successCount > 0 {
+		tm.lastRefresh = time.Now()
+		// 清理exhausted状态，让刷新后的token可以被重新选择
+		tm.exhausted = make(map[string]bool)
+	}
 	return nil
 }
 
